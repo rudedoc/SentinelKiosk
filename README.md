@@ -7,4 +7,4 @@
 
 # Context Dump
 
-`cat config_manager.py config.json main.py requirements.txt`
+`cat config_manager.py config.json main.py logger.py requirements.txt`

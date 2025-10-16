@@ -28,3 +28,12 @@ class ConfigManager:
         # 2. Create the final, formatted URLs
         self.starting_url = starting_url_template.format(self.user_id)
         self.heartbeat_url = heartbeat_endpoint_template.format(self.user_id)
+    
+    def to_dict(self):
+        """Return the configuration as a dictionary."""
+        return {
+            'user_id': self.user_id,
+            'starting_url': self.starting_url,
+            'heartbeat_url': self.heartbeat_url,
+            'preshared_key': self.preshared_key
+        }
