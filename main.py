@@ -9,7 +9,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebChannel import QWebChannel
 
-from config_manager import ConfigManager
+from kiosk_config import KioskConfig
 
 from logger import get_logger
 
@@ -201,7 +201,7 @@ class PageEventBridge(QObject):
         self.eventReceived.emit(event_data)
 
 if __name__ == "__main__":
-    config = ConfigManager()
+    config = KioskConfig()
     os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "8080"
     app = QApplication(sys.argv)
     window = MainWindow(config=config)
