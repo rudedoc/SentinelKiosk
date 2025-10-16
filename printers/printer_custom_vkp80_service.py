@@ -10,24 +10,17 @@ from barcode import get_barcode_class
 from barcode.writer import ImageWriter
 from PIL import Image
 
-# --- Constants for the CUSTOM VKP80II-SX ---
-# Based on the user and command manuals provided.
-CUSTOM_VKP80_CODEPAGE = "CP858"  # Default from manual page 79
-CUSTOM_VKP80_ENCODING = "cp858"  # Python's name for PC437
+# --- Constants ---
+CUSTOM_VKP80_CODEPAGE = "CP437"
+CUSTOM_VKP80_ENCODING = "cp437"
 IMAGE_PRINT_IMPL = "bitImageColumn"
 DEFAULT_BARCODE_IMAGE_OPTIONS = {
-    "dpi": 203, "module_width": 0.45, "module_height": 12.0,
-    "quiet_zone": 1.5, "font_size": 6, "write_text": True,
+    "dpi": 200, "module_width": 0.60, "module_height": 16.0,
+    "quiet_zone": 1.5, "font_size": 10, "write_text": True,
 }
 
 class PrinterCustomVkp80Service:
-    """
-    An ESC/POS printer service tailored for the CUSTOM VKP80II-SX kiosk printer.
-
-    This class uses the correct CUSTOM/POS command sequences for printing,
-    cutting, and ejecting tickets as documented in the official manuals.
-    """
-
+    # ... (the __init__ and _format_timestamp methods remain the same) ...
     def __init__(
         self,
         vendor_id: int,
@@ -42,126 +35,85 @@ class PrinterCustomVkp80Service:
         """Initializes the printer service."""
         self.mock = bool(mock)
         self._printer = None
-
-        if device:
-            self._printer = device
-            self.mock = False
-            return
-
-        if self.mock:
-            return
-
-        if EscposUsb is None:
-            raise RuntimeError("python-escpos or a USB backend is not available.")
-
+        if device: self._printer = device; self.mock = False; return
+        if self.mock: return
+        if EscposUsb is None: raise RuntimeError("python-escpos or a USB backend is not available.")
         backend = usb_backend or (libusb1.get_backend() if libusb1 else None)
-
-        # Instantiate the Usb printer with a generic profile.
-        # We will control the printer using raw commands based on the manual.
-        self._printer = EscposUsb(
-            vendor_id,
-            product_id,
-            interface=interface,
-            in_ep=in_ep,
-            out_ep=out_ep,
-            usb_backend=backend,
-            profile="default"
-        )
-        
-        # Initialize the printer to a known state.
-        self._printer._raw(b'\x1b\x40')  # ESC @ (Initialize)
+        self._printer = EscposUsb(vendor_id, product_id, interface=interface, in_ep=in_ep, out_ep=out_ep, usb_backend=backend, profile="default")
+        self._printer._raw(b'\x1b\x40')
         self._printer.charcode(CUSTOM_VKP80_CODEPAGE)
 
     def _format_timestamp(self, ts: Optional[Union[str, datetime]]) -> str:
-        """Formats a datetime object into a string."""
-        if not ts:
-            return ""
-        if isinstance(ts, str):
-            return ts
+        if not ts: return ""
+        if isinstance(ts, str): return ts
         return ts.strftime("%Y-%m-%d %H:%M:%S")
 
     def print_ticket(
         self,
         brand: str,
         message: str,
-        lines: Optional[List[str]] = None,
+        lines: Optional[List[Union[str, Dict]]] = None,
         barcode: Optional[str] = None,
         timestamp: Optional[Union[str, datetime]] = None,
         logo: Optional[Union[str, Any]] = None,
-        barcode_type: str = "CODE39",
+        barcode_type: str = "EAN8",
         amount: Optional[float] = None
     ) -> bool:
-        """
-        Prints a ticket using the specific CUSTOM/POS command set.
-        
-        logo: optional path to an image file (e.g. "logo.png") or a PIL Image-like object.
-        Returns True on success, False on error.
-        """
+        """Prints a ticket using a simple, unformatted style for all lines."""
         ts = self._format_timestamp(timestamp)
         lines = lines or []
 
         if self.mock or self._printer is None:
-            # Mock output for development without hardware
-            out = ["=" * 40, f"{brand.center(40)}", "-" * 40, message]
-            if logo:
-                logo_repr = logo if isinstance(logo, str) else "[PIL Image]"
-                out.insert(1, f"[LOGO: {logo_repr}]".center(40))
-            if amount is not None:
-                out.append(f"Amount: €{amount:,.2f}")
-            out.extend(lines)
-            if barcode:
-                out.append(f"[BARCODE {barcode_type}]: {barcode}")
-            if ts:
-                out.append(f"{ts.rjust(40)}")
-            out.append("=" * 40)
-            print("\n".join(out))
+            # (Your existing mock logic is fine here)
             return True
 
         try:
             p = self._printer
-
-            # Initialize printer and set encoding for this job
-            p._raw(b'\x1b\x40')  # ESC @ (Initialize)
+            p._raw(b'\x1b\x40')
             p.charcode(CUSTOM_VKP80_CODEPAGE)
             p.encoding = CUSTOM_VKP80_ENCODING
 
             if logo:
                 p.set(align="center")
                 p.image(logo, impl=IMAGE_PRINT_IMPL)
-                p.text("\n")
 
-            p.set(align="center", bold=True, width=2, height=2)
-            p.text(f"{brand}\n")
+            if brand:
+                p.set(align="center", bold=True, width=2, height=2)
+                p.text(f"{brand}\n")
             
-            p.set(align="center", bold=False, width=1, height=1)
-            p.text(f"{message}\n")
+            if message:
+                p.set(align="center", bold=False, width=1, height=1)
+                p.text(f"{message}\n")
+
+            # --- SIMPLIFIED LOOP ---
+            # Set one style for all subsequent lines and ignore formatting from JSON.
+            p.set(align='center', bold=False, height=1, width=1)
             
-            if amount is not None:
-                p.set(align="center", bold=True, height=2)
-                p.text(f"€{amount:,.2f}\n")
-                p.set(height=1) # Reset height
+            for line_data in lines:
+                if isinstance(line_data, dict):
+                    text = line_data.get('text', '')
+                    # Just print the text, ignoring all style information
+                    p.text(f"{text}\n")
+                else:
+                    # Fallback for simple strings
+                    p.text(f"{line_data}")
+            # --- END OF LOOP ---
 
-            for ln in lines:
-                p.set(align="center")
-                p.text(f"{ln}\n")
+            p.text("\n")
 
-            if ts:
-                p.set(align="center", bold=False)
-                p.text(f"{ts}\n")
+            p.set(align='center')
 
             if barcode:
-                p.set(align="center")
                 self._print_barcode_image(p, barcode, barcode_type, DEFAULT_BARCODE_IMAGE_OPTIONS)
+                p.text('\n')
 
-            # --- CORRECT CUT AND EJECT SEQUENCE FOR VKP80II ---
-            # This sequence is crucial and based on the command manual.
+            if ts:
+                p.set(font='b')
+                p.text(f"{ts}\n")
             
-            # 1. Send the raw "Total Cut" command (ESC i)
+            # Final cut and present sequence
             p._raw(b'\x1b\x69')
-            
-            # 2. Send the raw "Ticket Ejected" command (GS e, n=5)
             p._raw(b'\x1d\x65\x05')
-            # --- END OF SEQUENCE ---
 
             return True
         except Exception as e:
@@ -169,7 +121,7 @@ class PrinterCustomVkp80Service:
             return False
 
     def _print_barcode_image(self, printer: Any, data: str, barcode_type: str, options: Optional[Dict] = None) -> None:
-        """Renders a barcode to an in-memory image and prints it."""
+        # ... (this method remains the same) ...
         barcode_cls = get_barcode_class(barcode_type.lower())
         buffer = io.BytesIO()
         barcode_obj = barcode_cls(data, writer=ImageWriter())
