@@ -8,11 +8,16 @@ from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 
 from config_manager import ConfigManager
 
+from logger import get_logger
+
+logger = get_logger(__name__)
+
 # (Paste the CustomRequestInterceptor class from above here)
 class CustomRequestInterceptor(QWebEngineUrlRequestInterceptor):
     def __init__(self, key, parent=None):
         super().__init__(parent)
         self.preshared_key = key
+        logger.info("CustomRequestInterceptor initialized with preshared key.")
 
     def interceptRequest(self, info):
         header_name = b'Authorization'
@@ -36,12 +41,12 @@ class MainWindow(QMainWindow):
         self.interceptor = CustomRequestInterceptor(self.config.preshared_key)
 
         # 2. Install it on the web engine's profile. This affects all requests.
-        self.web_view.page().profile().setUrlRequestInterceptor(self.interceptor)
+        self.profile.setUrlRequestInterceptor(self.interceptor)
         
         # --- Load the URL ---
         # Now, when this request is made, the interceptor will add the header.
-        print(f"Loading URL: {self.config.starting_url}")
         self.web_view.setUrl(QUrl(self.config.starting_url))
+        logger.info(f"Loaded URL: {self.config.starting_url}")
 
 if __name__ == "__main__":
     config = ConfigManager()
