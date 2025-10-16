@@ -38,9 +38,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.web_view)
 
         # --- 🚀 Set up the Interceptor ---
-        #  Create an instance of our interceptor with the key
+        #  Create an instance of our interceptor with the key and attach it to the profile
         self.interceptor = CustomRequestInterceptor(self.config.preshared_key, self.config.user_id)
-        
+        profile = self.web_view.page().profile()
+        profile.setUrlRequestInterceptor(self.interceptor)
+
         # --- Load the URL ---
         # Now, when this request is made, the interceptor will add the header.
         self.web_view.setUrl(QUrl(self.config.starting_url))
