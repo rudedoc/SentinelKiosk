@@ -13,18 +13,18 @@ class ConfigManager:
             sys.exit(1)
 
         # Load all values from the JSON file
-        self.kiosk_id = config_data.get('kiosk_id')
+        self.user_id = config_data.get('user_id')
         # 1. Read the new URL template
         starting_url_template = config_data.get('starting_url')
         heartbeat_endpoint_template = config_data.get('heartbeat_endpoint')
         self.preshared_key = config_data.get('preshared_key')
 
         # Validate that essential templates and keys are present
-        required_keys = [starting_url_template, self.preshared_key, self.kiosk_id]
+        required_keys = [starting_url_template, self.preshared_key, self.user_id]
         if not all(required_keys):
-            print("Error: 'starting_url', 'preshared_key', and 'kiosk_id' are required in config.json.")
+            print("Error: 'starting_url', 'preshared_key', and 'user_id' are required in config.json.")
             sys.exit(1)
             
         # 2. Create the final, formatted URLs
-        self.starting_url = starting_url_template.format(self.kiosk_id)
-        self.heartbeat_url = heartbeat_endpoint_template.format(self.kiosk_id)
+        self.starting_url = starting_url_template.format(self.user_id)
+        self.heartbeat_url = heartbeat_endpoint_template.format(self.user_id)

@@ -14,22 +14,23 @@ logger = get_logger(__name__)
 
 # (Paste the CustomRequestInterceptor class from above here)
 class CustomRequestInterceptor(QWebEngineUrlRequestInterceptor):
-    def __init__(self, key, parent=None):
+    def __init__(self, key, user_id, parent=None):
         super().__init__(parent)
         self.preshared_key = key
-        logger.info("CustomRequestInterceptor initialized with preshared key.")
+        self.user_id = user_id
+        logger.info("CustomRequestInterceptor initialized with preshared key and user id.")
 
     def interceptRequest(self, info):
-        header_name = b'Authorization'
-        header_value = f'Bearer {self.preshared_key}'.encode('utf-8')
-        info.setHttpHeader(header_name, header_value)
+        # Attach both the Authorization and user id headers to every outbound request.
+        info.setHttpHeader(b'Authorization', f'Bearer {self.preshared_key}'.encode('utf-8'))
+        info.setHttpHeader(b'X-User-Id', str(self.user_id).encode('utf-8'))
 
 class MainWindow(QMainWindow):
     def __init__(self, config):
         super().__init__()
         self.config = config
 
-        window_title = f"SentinelKiosk - ID: {self.config.kiosk_id}"
+        window_title = f"SentinelKiosk - User ID: {self.config.user_id}"
         self.setWindowTitle(window_title)
         self.setGeometry(100, 100, 1280, 720)
 
@@ -37,11 +38,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.web_view)
 
         # --- 🚀 Set up the Interceptor ---
-        # 1. Create an instance of our interceptor with the key
-        self.interceptor = CustomRequestInterceptor(self.config.preshared_key)
-
-        # 2. Install it on the web engine's profile. This affects all requests.
-        self.profile.setUrlRequestInterceptor(self.interceptor)
+        #  Create an instance of our interceptor with the key
+        self.interceptor = CustomRequestInterceptor(self.config.preshared_key, self.config.user_id)
         
         # --- Load the URL ---
         # Now, when this request is made, the interceptor will add the header.
