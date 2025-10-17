@@ -3,9 +3,10 @@ import os
 import json
 from datetime import datetime, UTC
 from typing import Any, Dict, Optional
-from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread
+from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView
+
 # NEW: Import the interceptor base class
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebChannel import QWebChannel
@@ -213,64 +214,77 @@ class MainWindow(QMainWindow):
     def inject_event_capture(self) -> None:
         """Inject helper JavaScript that forwards browser events to Python."""
         event_script = """
-            (function() {
+            (function () {
                 if (window.__sentinelBridgeInitialized) { return; }
                 window.__sentinelBridgeInitialized = true;
 
-                function forwardEvent(bridge, type, payload) {
+                // 1) Define Python → JS immediately (does NOT depend on WebChannel)
+                if (typeof window.receiveSentinelEvent !== 'function') {
+                    console.log('defining receiveSentinelEvent (eager)');
+                    window.receiveSentinelEvent = function (type, data) {
+                    console.log('[Sentinel ← Python]', type, data);
                     try {
-                        bridge.handleEvent(JSON.stringify({ type: type, payload: payload }));
-                    } catch (error) {
-                        console.error('Failed to forward event', type, error);
+                        window.dispatchEvent(new CustomEvent(type, { detail: data }));
+                    } catch (e) {
+                        console.warn('Failed to dispatch CustomEvent', e);
                     }
+                    };
+                }
+
+                function forwardEvent(bridge, type, payload) {
+                    try { bridge.handleEvent(JSON.stringify({ type, payload })); }
+                    catch (error) { console.error('Failed to forward event', type, error); }
                 }
 
                 function ensureChannelReady(callback, attempt) {
                     attempt = attempt || 0;
 
                     if (window.SentinelBridge) {
-                        callback(window.SentinelBridge);
-                        return;
+                    callback(window.SentinelBridge);
+                    return;
                     }
 
                     if (typeof qt !== 'undefined' && qt.webChannelTransport) {
-                        new QWebChannel(qt.webChannelTransport, function(channel) {
-                            window.SentinelBridge = channel.objects.SentinelBridge;
-                            callback(window.SentinelBridge);
-                        });
-                        return;
+                    new QWebChannel(qt.webChannelTransport, function (channel) {
+                        window.SentinelBridge = channel.objects.SentinelBridge;
+                        callback(window.SentinelBridge);
+                    });
+                    return;
                     }
 
                     if (attempt > 20) {
-                        console.warn('SentinelBridge: qt.webChannelTransport never became available.');
-                        return;
+                    console.warn('SentinelBridge: qt.webChannelTransport never became available.');
+                    return;
                     }
 
-                    window.setTimeout(function() {
-                        ensureChannelReady(callback, attempt + 1);
+                    window.setTimeout(function () {
+                    ensureChannelReady(callback, attempt + 1);
                     }, 100);
                 }
 
                 function installHandlers(bridge) {
-                    window.dispatchSentinelEvent = function(type, data) {
-                        forwardEvent(bridge, type, data);
+                    // 2) JS → Python (only needs WebChannel)
+                    window.dispatchSentinelEvent = function (type, data) {
+                    forwardEvent(bridge, type, data);
                     };
 
-                    window.addEventListener('message', function(event) {
-                        forwardEvent(bridge, 'message', event.data);
+                    // Whatever listeners you want (optional)
+                    window.addEventListener('message', function (event) {
+                    forwardEvent(bridge, 'message', event.data);
                     }, false);
 
-                    document.addEventListener('click', function(event) {
-                        forwardEvent(bridge, 'click', {
-                            tag: event.target.tagName,
-                            id: event.target.id || null,
-                            classes: event.target.className || null,
-                            timestamp: Date.now()
-                        });
+                    document.addEventListener('click', function (event) {
+                    forwardEvent(bridge, 'click', {
+                        tag: event.target.tagName,
+                        id: event.target.id || null,
+                        classes: event.target.className || null,
+                        timestamp: Date.now()
+                    });
                     }, true);
                 }
 
-                ensureChannelReady(installHandlers);
+            // Only the JS→Python side waits for WebChannel
+            ensureChannelReady(installHandlers);
             })();
         """
 
@@ -295,9 +309,9 @@ class MainWindow(QMainWindow):
         self.web_view.page().runJavaScript(bridge_loader, self._on_bridge_injected)
 
     def _on_bridge_injected(self, _=None):
-        # probe for the helper
+        # probe for the helper the page actually defines
         self.web_view.page().runJavaScript(
-            "!!window.dispatchSentinelEvent",
+            "typeof window.receiveSentinelEvent === 'function'",
             lambda ok: self._on_bridge_ready(bool(ok))
         )
 
@@ -403,10 +417,10 @@ class MainWindow(QMainWindow):
 
     def _send_to_web(self, event_name: str, payload: dict):
         js = (
-            "window.dispatchSentinelEvent && "
-            f"window.dispatchSentinelEvent({json.dumps(event_name)}, {json.dumps(payload)});"
+            "window.receiveSentinelEvent && "
+            f"window.receiveSentinelEvent({json.dumps(event_name)}, {json.dumps(payload)});"
         )
-        if self._bridge_ready:
+        if self._bridge_readyw:
             self.web_view.page().runJavaScript(js)
         else:
             self._pending_web_events.append((event_name, payload))
@@ -417,6 +431,26 @@ class MainWindow(QMainWindow):
         for name, payload in self._pending_web_events:
             self._send_to_web(name, payload)
         self._pending_web_events.clear()
+
+    def _on_bridge_injected(self, _=None):
+        # poll up to ~2s for receiveSentinelEvent to exist
+        self._poll_bridge_ready(tries=20)
+
+    def _poll_bridge_ready(self, tries: int):
+        if tries <= 0:
+            self._on_bridge_ready(False)
+            return
+        self.web_view.page().runJavaScript(
+            "typeof window.receiveSentinelEvent === 'function'",
+            lambda ok: self._bridge_ready_callback(bool(ok), tries)
+        )
+
+    def _bridge_ready_callback(self, ok: bool, tries_left: int):
+        if ok:
+            self._on_bridge_ready(True)
+        else:
+            QTimer.singleShot(100, lambda: self._poll_bridge_ready(tries_left - 1))
+
 
     def closeEvent(self, e):
         # stop NV9 worker cleanly
