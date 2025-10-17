@@ -222,7 +222,6 @@ class MainWindow(QMainWindow):
                 if (typeof window.receiveSentinelEvent !== 'function') {
                     console.log('defining receiveSentinelEvent (eager)');
                     window.receiveSentinelEvent = function (type, data) {
-                    console.log('[Sentinel ← Python]', type, data);
                     try {
                         window.dispatchEvent(new CustomEvent(type, { detail: data }));
                     } catch (e) {
@@ -420,7 +419,7 @@ class MainWindow(QMainWindow):
             "window.receiveSentinelEvent && "
             f"window.receiveSentinelEvent({json.dumps(event_name)}, {json.dumps(payload)});"
         )
-        if self._bridge_readyw:
+        if self._bridge_ready:
             self.web_view.page().runJavaScript(js)
         else:
             self._pending_web_events.append((event_name, payload))
