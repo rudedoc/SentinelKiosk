@@ -6,3 +6,4 @@ python-escpos
 pyusb
 python-barcode
 Pillow
+pyserial>=3.5

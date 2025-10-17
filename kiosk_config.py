@@ -27,27 +27,41 @@ class KioskConfig:
         self.printer_in_endpoint = printer_config.get('in_endpoint') # 0x81
         self.printer_out_endpoint = printer_config.get('out_endpoint') # 0x03
 
+
+        # ---- nv9 block (this is what you asked to add) ----
+        nv9 = config_data.get("nv9")
+        # keep names close to JSON keys for clarity
+        self.nv9_port_name: str = nv9.get("port_name")
+        self.nv9_baud_rate: int = int(nv9.get("baud_rate"))
+        self.nv9_slave_id: int = int(nv9.get("slave_id"))
+        self.nv9_host_protocol_version: int = int(nv9.get("host_protocol_version"))
+
         # Validate that essential templates and keys are present
         required_keys = [self.starting_url, self.preshared_key, self.user_id]
         if not all(required_keys):
             print("Error: 'starting_url', 'preshared_key', and 'user_id' are required in config.json.")
             sys.exit(1)
             
-    def to_dict(self):
-        """Return the configuration as a dictionary."""
+    def to_dict(self) -> dict:
         return {
-            'user_id': self.user_id,
-            'starting_url': self.starting_url,
-            'heartbeat_url': self.heartbeat_url,
-            'preshared_key': self.preshared_key,
-            'brand_name': self.brand_name,
-            'logo_path': self.logo_path,
-            'printer': {
-                'mock': self.printer_mock,
-                'vendor_id': self.printer_vendor_id,
-                'product_id': self.printer_product_id,
-                'interface': self.printer_interface,
-                'in_endpoint': self.printer_in_endpoint,
-                'out_endpoint': self.printer_out_endpoint,
-            }
+            "user_id": self.user_id,
+            "starting_url": self.starting_url,
+            "heartbeat_url": self.heartbeat_url(),
+            "preshared_key": self.preshared_key,
+            "brand_name": self.brand_name,
+            "logo_path": self.logo_path,
+            "printer": {
+                "mock": self.printer_mock,
+                "vendor_id": self.printer_vendor_id,
+                "product_id": self.printer_product_id,
+                "interface": self.printer_interface,
+                "in_endpoint": self.printer_in_endpoint,
+                "out_endpoint": self.printer_out_endpoint,
+            },
+            "nv9": {
+                "port_name": self.nv9_port_name,
+                "baud_rate": self.nv9_baud_rate,
+                "slave_id": self.nv9_slave_id,
+                "host_protocol_version": self.nv9_host_protocol_version,
+            },
         }
