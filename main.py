@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 # NEW: Import the interceptor base class
-from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
+from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor, QWebEngineUrlRequestInfo as ReqInfo
 from PySide6.QtWebChannel import QWebChannel
 
 from kiosk_config import KioskConfig
@@ -25,18 +25,59 @@ logger = get_logger(__name__)
 
 logger.info("STARTING APPLICATION")
 
-# (Paste the CustomRequestInterceptor class from above here)
 class CustomRequestInterceptor(QWebEngineUrlRequestInterceptor):
     def __init__(self, key, user_id, parent=None):
         super().__init__(parent)
         self.preshared_key = key
         self.user_id = user_id
-        logger.info("CustomRequestInterceptor initialized with preshared key and user id.")
 
-    def interceptRequest(self, info):
-        # Attach both the Authorization and user id headers to every outbound request.
-        info.setHttpHeader(b'Authorization', f'Bearer {self.preshared_key}'.encode('utf-8'))
-        info.setHttpHeader(b'X-User-Id', str(self.user_id).encode('utf-8'))
+        # Only your own origins here (do NOT include S3/CDNs)
+        self._auth_hosts = {
+            "betxs-dev.eu.ngrok.io",
+            # "api.yourdomain.tld",
+        }
+
+        RT = ReqInfo.ResourceType
+        # Helper to safely grab enums that may not exist in this Qt version
+        def rt(name): return getattr(RT, name, None)
+
+        # Where it makes sense to send auth (filter out Nones)
+        self._auth_types = {
+            x for x in {
+                rt("ResourceTypeMainFrame"),
+                rt("ResourceTypeSubFrame"),
+                rt("ResourceTypeXhr"),
+                rt("ResourceTypeFetch"),          # not present on some builds
+                rt("ResourceTypeServiceWorker"),
+                rt("ResourceTypeWorker"),
+            } if x is not None
+        }
+
+        # Never add auth to static assets (and prefetch)
+        self._asset_types = {
+            x for x in {
+                rt("ResourceTypeImage"),
+                rt("ResourceTypeStylesheet"),
+                rt("ResourceTypeFontResource"),
+                rt("ResourceTypeMedia"),
+                rt("ResourceTypeFavicon"),
+                rt("ResourceTypePrefetch"),
+            } if x is not None
+        }
+
+    def interceptRequest(self, info: ReqInfo):
+        host = info.requestUrl().host().lower()
+        rtype = info.resourceType()
+
+        # Skip assets regardless of host
+        if rtype in self._asset_types:
+            return
+
+        # Attach only for your own hosts and “authful” request types
+        if host in self._auth_hosts and rtype in self._auth_types:
+            info.setHttpHeader(b"Authorization", f"Bearer {self.preshared_key}".encode("utf-8"))
+            info.setHttpHeader(b"X-User-Id", str(self.user_id).encode("utf-8"))
+
 
 class MainWindow(QMainWindow):
     def __init__(self, config):
