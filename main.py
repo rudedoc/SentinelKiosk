@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime, UTC
 from typing import Any, Dict, Optional
-from PySide6.QtCore import QObject, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView
 # NEW: Import the interceptor base class
@@ -11,6 +11,9 @@ from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PySide6.QtWebChannel import QWebChannel
 
 from kiosk_config import KioskConfig
+
+from NV9.nv9_worker import NV9Worker
+from NV9.nv9_core import NV9Validator
 
 from logger import get_logger
 
@@ -34,6 +37,9 @@ class CustomRequestInterceptor(QWebEngineUrlRequestInterceptor):
 class MainWindow(QMainWindow):
     def __init__(self, config):
         super().__init__()
+
+        self._bridge_ready = False
+        self._pending_web_events = []
         self.config = config
         self.printer_service = None
 
@@ -45,6 +51,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.web_view)
 
         # Track when the target page finishes loading so we can react to it.
+        self.web_view.loadStarted.connect(self._on_load_started)
         self.web_view.loadFinished.connect(self.on_load_finished)
 
         # Prepare a bridge so JavaScript inside the page can talk back to Python.
@@ -62,6 +69,9 @@ class MainWindow(QMainWindow):
 
         # --- 🖨️ Initialize the Printer Service ---
         self._initialize_printer() # <-- ADD THIS CALL
+
+        # --- 💶 Initialize the NV9 bill validator worker (background polling) ---
+        self._initialize_nv9()
 
         # --- Load the URL ---
         # Now, when this request is made, the interceptor will add the header.
@@ -93,6 +103,103 @@ class MainWindow(QMainWindow):
             logger.error(f"FATAL: Could not initialize printer: {e}")
             logger.warning("Application will continue without printer functionality.")
             self.printer_service = None # Ensure it's None on failure
+
+    def _initialize_nv9(self):
+        """Create NV9 worker in its own QThread and start background polling."""
+        # Prepare thread + worker
+        self._nv9_thread = QThread(self)
+
+        validator = NV9Validator(
+            port=self.config.nv9_port_name,
+            baud=self.config.nv9_baud_rate,
+            slave_id=self.config.nv9_slave_id,
+            host_protocol_version=self.config.nv9_host_protocol_version,
+        )
+
+        self._nv9_worker = NV9Worker(
+            port=self.config.nv9_port_name,
+            baud=self.config.nv9_baud_rate,
+            poll_ms=100,           # 10 Hz; adjust if needed
+            validator=validator,   # <-- pass the validator here
+        )
+        self._nv9_worker.moveToThread(self._nv9_thread)
+
+        # Lifecycle wiring
+        self._nv9_thread.started.connect(self._nv9_worker.start)
+        self._nv9_worker.disconnected.connect(self._nv9_thread.quit)
+        self._nv9_thread.finished.connect(self._nv9_worker.deleteLater)
+
+        # Logging hooks
+        self._nv9_worker.rejected.connect(lambda reason: logger.info(f"[NV9][EVENT] REJECTED — {reason}"))
+        self._nv9_worker.status.connect(lambda s: logger.info(f"[NV9][STATUS] {s}"))
+        self._nv9_worker.error.connect(lambda e: logger.error(f"[NV9][ERROR] {e}"))
+        self._nv9_worker.connected.connect(lambda: logger.info("[NV9] Connected"))
+        self._nv9_worker.disconnected.connect(lambda: logger.info("[NV9] Disconnected"))
+        self._nv9_worker.credit.connect(self._on_bill_credit)
+
+        # Raw event stream (lightweight log for now)
+        def _unknown_label(ev):
+            return f"UNKNOWN(0x{ev.code:02X})" if getattr(ev, "code", None) is not None else "UNKNOWN"
+
+        def _log_event(ev):
+            name = ev.name if ev.name != "UNKNOWN" else _unknown_label(ev)
+
+            if name == "CREDIT":
+                # ev.value is major units (e.g., euros). The worker also emits credit (minor units) separately.
+                logger.info(f"[NV9][EVENT] CREDIT value={ev.value} channel={ev.channel}")
+
+            elif name == "REJECTED":
+                # Ask the validator for the last reject reason code/message
+                try:
+                    reason = self._nv9_worker.validator.get_last_reject_reason() or "unknown"
+                except Exception:
+                    reason = "unknown"
+                logger.info(f"[NV9][EVENT] REJECTED — {reason}")
+
+            elif name == "READING":
+                logger.debug("[NV9][EVENT] READING")
+
+            elif name == "REJECTING":
+                logger.debug("[NV9][EVENT] REJECTING")
+
+            elif name == "REJECTED":
+                # Reason already logged via self._nv9_worker.rejected signal
+                logger.info("[NV9][EVENT] REJECTED")
+
+            elif name == "STACKING":
+                logger.debug("[NV9][EVENT] STACKING")
+
+            elif name == "STACKED":
+                logger.info("[NV9][EVENT] STACKED")
+
+            elif name == "NOTE_READ":
+                ch = getattr(ev, "channel", None)
+                val = getattr(ev, "value", None)
+                if ch is not None and val is not None:
+                    logger.info(f"[NV9][EVENT] NOTE_READ (ch {ch}, EUR {val})")
+                elif ch is not None:
+                    logger.info(f"[NV9][EVENT] NOTE_READ (ch {ch})")
+                else:
+                    logger.info("[NV9][EVENT] NOTE_READ")
+
+            elif name == "DISABLED":
+                logger.warning("[NV9][EVENT] DISABLED")
+
+            elif name == "SLAVE_RESET":
+                logger.warning("[NV9][EVENT] SLAVE_RESET")
+
+            else:
+                # Any other or labeled-UNKNOWN falls back here
+                logger.info(f"[NV9][EVENT] {name}")
+
+        self._nv9_worker.eventReceived.connect(_log_event)
+
+        # Go!
+        self._nv9_thread.start()
+
+    def _on_load_started(self):
+        # Page navigating; pause direct sends until bridge is reinjected & confirmed
+        self._bridge_ready = False
 
     def on_load_finished(self, ok: bool) -> None:
         """Handle the page load event from the embedded web view."""
@@ -185,7 +292,22 @@ class MainWindow(QMainWindow):
             })();
         """ % event_script
 
-        self.web_view.page().runJavaScript(bridge_loader)
+        self.web_view.page().runJavaScript(bridge_loader, self._on_bridge_injected)
+
+    def _on_bridge_injected(self, _=None):
+        # probe for the helper
+        self.web_view.page().runJavaScript(
+            "!!window.dispatchSentinelEvent",
+            lambda ok: self._on_bridge_ready(bool(ok))
+        )
+
+    def _on_bridge_ready(self, ok: bool):
+        self._bridge_ready = ok
+        if ok:
+            logger.info("[WEB] SentinelBridge ready; flushing pending events.")
+            self._flush_pending_web_events()
+        else:
+            logger.warning("[WEB] SentinelBridge not ready yet.")
 
     def on_js_event(self, event_data: Dict[str, Any]) -> None:
         """React to events that come from the embedded page."""
@@ -264,7 +386,51 @@ class MainWindow(QMainWindow):
             # For example, you could close the application:
             print("LOGOUT REQUESTED! Shutting down.")
             QApplication.instance().quit()
-            
+
+    def _on_bill_credit(self, value_minor: int, channel: int):
+        """Forward CREDIT events to the embedded web app via dispatchSentinelEvent."""
+        logger.info(f"[NV9][CREDIT] value={value_minor} channel={channel}")
+        value_major = value_minor / 100.0
+        payload = {
+            "value_minor": int(value_minor),
+            "value_major": value_major,     # convenience for JS
+            "channel": int(channel),
+            "ts": int(datetime.now(UTC).timestamp() * 1000)  # ms epoch
+        }
+
+        logger.info(f"[NV9][CREDIT→WEB] value_minor={value_minor} (≈€{value_major:.2f}), ch={channel}")
+        self._send_to_web("nv9_credit", payload)
+
+    def _send_to_web(self, event_name: str, payload: dict):
+        js = (
+            "window.dispatchSentinelEvent && "
+            f"window.dispatchSentinelEvent({json.dumps(event_name)}, {json.dumps(payload)});"
+        )
+        if self._bridge_ready:
+            self.web_view.page().runJavaScript(js)
+        else:
+            self._pending_web_events.append((event_name, payload))
+
+    def _flush_pending_web_events(self):
+        if not self._bridge_ready:
+            return
+        for name, payload in self._pending_web_events:
+            self._send_to_web(name, payload)
+        self._pending_web_events.clear()
+
+    def closeEvent(self, e):
+        # stop NV9 worker cleanly
+        try:
+            if hasattr(self, "_nv9_worker") and self._nv9_worker is not None:
+                self._nv9_worker.stop()
+            if hasattr(self, "_nv9_thread") and self._nv9_thread is not None:
+                self._nv9_thread.quit()
+                self._nv9_thread.wait()
+        except Exception as ex:
+            logger.warning(f"Error during NV9 shutdown: {ex}")
+        finally:
+            super().closeEvent(e)
+
 
 class PageEventBridge(QObject):
     """Expose slots that JavaScript can call through the Qt WebChannel."""

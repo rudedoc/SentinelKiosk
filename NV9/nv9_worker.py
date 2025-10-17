@@ -17,6 +17,7 @@ class NV9Worker(QObject):
     disconnected = Signal()
     eventReceived = Signal(object)   # NV9Event
     credit = Signal(int, int)        # value, channel
+    rejected = Signal(str) 
 
     def __init__(self,
                  port: str,
@@ -80,6 +81,12 @@ class NV9Worker(QObject):
                     for ev in events:
                         if ev.code == self.validator.RSP_SSP_CREDIT_NOTE and ev.value is not None and ev.channel is not None:
                             self.credit.emit(ev.value * 100, ev.channel)
+
+                        # REJECTED -> fetch reason here (worker thread) and emit
+                        if ev.code == self.validator.RSP_SSP_REJECTED:
+                            reason = self.validator.get_last_reject_reason() or "unknown"
+                            # normalize to string for logging/UI
+                            self.rejected.emit(str(reason))
 
                 except Exception as e:
                     # Keep the loop alive on unexpected errors; surface details to UI/logging.
