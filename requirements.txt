@@ -7,3 +7,4 @@ pyusb
 python-barcode
 Pillow
 pyserial>=3.5
+pyinstaller==6.16.0
