@@ -4,8 +4,9 @@ import json
 import argparse
 from datetime import datetime, UTC
 from typing import Any, Dict, Optional
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QObject, QUrl, Signal, Slot, QThread, QTimer
-from PySide6.QtWidgets import QApplication, QMainWindow
+from PySide6.QtWidgets import QApplication, QMainWindow, QSplashScreen
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 # NEW: Import the interceptor base class
@@ -612,19 +613,72 @@ class PageEventBridge(QObject):
 
         self.eventReceived.emit(event_data)
 
+def create_splash(logo_path: Optional[str]) -> QSplashScreen:
+    # Try to show your logo; fall back to a text-only splash
+    pix: Optional[QPixmap] = None
+    if logo_path and os.path.exists(logo_path):
+        pix = QPixmap(logo_path)
+        if not pix.isNull():
+            # scale down a bit so it doesn’t dominate on 1080p
+            pix = pix.scaledToWidth(480, Qt.SmoothTransformation)
+    splash = QSplashScreen(pix if pix and not pix.isNull() else QPixmap(), Qt.WindowStaysOnTopHint)
+    # Helpful initial message
+    splash.showMessage("Starting Sentinel Kiosk…", Qt.AlignHCenter | Qt.AlignBottom, Qt.white)
+    return splash
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fullscreen", action="store_true",
-                        help="Start the app in fullscreen")
+    # display mode
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--kiosk", action="store_true",
+                      help="Frameless fullscreen (kiosk mode)")
+    mode.add_argument("--fullscreen", action="store_true",
+                      help="Fullscreen with normal window frame")
+    mode.add_argument("--windowed", action="store_true",
+                      help="Force windowed (default)")
+
+    # QtWebEngine devtools: optional port argument
+    # Usage:
+    #   --devtools         -> enables on port 8080
+    #   --devtools 9222    -> enables on port 9222
+    parser.add_argument("--devtools", nargs="?", const="8080",
+                        help="Enable QtWebEngine remote debugging (optional port, default 8080)")
+
     args = parser.parse_args()
 
-    config = KioskConfig()
-    os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "8080"
+    # ---- DevTools: enable only if requested (must be before QApplication is created!) ----
+    if args.devtools:
+        port = str(args.devtools)
+        os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = port
+        # Avoid Chrome/Qt handshake error when opening DevTools
+        existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+        flags = existing.split() if existing else []
+        if not any(f.startswith("--remote-allow-origins") for f in flags):
+            flags.append("--remote-allow-origins=*")
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+        logger.info(f"QtWebEngine DevTools enabled on http://127.0.0.1:{port}")
 
+    # ---- App startup ----
     app = QApplication(sys.argv)
+    # -- NEW: splash --
+    splash = create_splash("splash.png")
+    splash.show()
+    app.processEvents()  # let the splash paint
+
+    config = KioskConfig()
     window = MainWindow(config=config)
 
-    if args.fullscreen:
+    # When the first page finishes loading, hide the splash.
+    # (You already connect loadFinished in MainWindow, so we can piggy-back here.)
+    window.web_view.loadFinished.connect(lambda ok: splash.finish(window))
+
+    # Safety valve: don’t leave users stuck if load stalls
+    QTimer.singleShot(10_000, lambda: splash.finish(window))  # 10s fallback
+
+    if args.kiosk:
+        window.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        window.showFullScreen()
+    elif args.fullscreen:
         window.showFullScreen()
     else:
         window.show()
