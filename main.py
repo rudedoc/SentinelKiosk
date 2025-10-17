@@ -1,9 +1,10 @@
 import sys
 import os
 import json
+import argparse
 from datetime import datetime, UTC
 from typing import Any, Dict, Optional
-from PySide6.QtCore import QObject, QUrl, Signal, Slot, QThread, QTimer
+from PySide6.QtCore import Qt, QObject, QUrl, Signal, Slot, QThread, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
@@ -612,9 +613,20 @@ class PageEventBridge(QObject):
         self.eventReceived.emit(event_data)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="Start the app in fullscreen")
+    args = parser.parse_args()
+
     config = KioskConfig()
     os.environ["QTWEBENGINE_REMOTE_DEBUGGING"] = "8080"
+
     app = QApplication(sys.argv)
     window = MainWindow(config=config)
-    window.show()
+
+    if args.fullscreen:
+        window.showFullScreen()
+    else:
+        window.show()
+
     sys.exit(app.exec())
