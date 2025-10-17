@@ -15,12 +15,15 @@ from kiosk_config import KioskConfig
 
 from NV9.nv9_worker import NV9Worker
 from NV9.nv9_core import NV9Validator
+from G13.g13_worker import G13Worker
 
 from logger import get_logger
 
 from printers.printer_custom_vkp80_service import PrinterCustomVkp80Service
 
 logger = get_logger(__name__)
+
+logger.info("STARTING APPLICATION")
 
 # (Paste the CustomRequestInterceptor class from above here)
 class CustomRequestInterceptor(QWebEngineUrlRequestInterceptor):
@@ -74,10 +77,14 @@ class MainWindow(QMainWindow):
         # --- 💶 Initialize the NV9 bill validator worker (background polling) ---
         self._initialize_nv9()
 
+        # --- 💰 Initialize the G13 coin validator worker ---
+        self._initialize_g13()
+
         # --- Load the URL ---
         # Now, when this request is made, the interceptor will add the header.
         self.web_view.setUrl(QUrl(self.config.starting_url))
         logger.info(f"Loaded URL: {self.config.starting_url}")
+        logger.info("APPLICATION STARTED")
 
     # --- ADD THIS ENTIRE METHOD to the MainWindow class ---
     def _initialize_printer(self):
@@ -197,6 +204,77 @@ class MainWindow(QMainWindow):
 
         # Go!
         self._nv9_thread.start()
+
+    def _initialize_g13(self):
+        """Create G13 worker in its own QThread and start background polling."""
+        self._g13_thread = QThread(self)
+        self._g13_worker = G13Worker(
+            port=self.config.g13_port_name,
+            addr=self.config.g13_address
+        )
+        self._g13_worker.moveToThread(self._g13_thread)
+
+        # Lifecycle
+        self._g13_thread.started.connect(self._g13_worker.start)
+        self._g13_worker.stopped.connect(self._g13_thread.quit)
+        self._g13_thread.finished.connect(self._g13_worker.deleteLater)
+
+        # Logging + event bridge
+        self._g13_worker.started.connect(lambda: logger.info("[G13] Started"))
+        self._g13_worker.stopped.connect(lambda: logger.info("[G13] Stopped"))
+        self._g13_worker.error.connect(lambda e: logger.error(f"[G13][ERROR] {e}"))
+        self._g13_worker.status.connect(lambda st: logger.info(f"[G13][STATUS] {st}"))
+        self._g13_worker.event.connect(self._on_g13_event)
+
+        self._g13_thread.start()
+
+    def _on_g13_event(self, ev: dict):
+        """
+        ev example (credit):
+        {
+        'type':'credit', 'coin_type':4, 'coin_id':'EU050A',
+        'label':'€0.50 (EU050A)', 'value_cents':50, 'path':1, 'counter':123
+        }
+        or error: {'type':'error','code':14,'desc':'Credit sensor blocked','counter':124}
+        """
+        try:
+            if ev.get("type") == "credit":
+                value_minor = int(ev.get("value_cents") or 0)
+                coin_type = int(ev.get("coin_type") or 0)
+                coin_id = ev.get("coin_id")
+                label = ev.get("label")
+                path = int(ev.get("path") or 0)
+
+                payload = {
+                    "value_minor": value_minor,
+                    "value_major": value_minor / 100.0,
+                    "coin_type": coin_type,
+                    "coin_id": coin_id,
+                    "label": label,
+                    "path": path,
+                    "counter": int(ev.get("counter") or 0),
+                    "ts": int(datetime.now(UTC).timestamp() * 1000)
+                }
+                logger.info(f"[G13][CREDIT] {label} (type {coin_type}, path {path})")
+                logger.info(f"[G13][CREDIT→WEB] €{payload['value_major']:.2f}, type={coin_type}, path={path}")
+                self._send_to_web("g13_credit", payload)
+            else:
+                # error event
+                payload = {
+                    "code": int(ev.get("code") or 0),
+                    "desc": ev.get("desc"),
+                    "counter": int(ev.get("counter") or 0),
+                    "ts": int(datetime.now(UTC).timestamp() * 1000)
+                }
+                logger.warning(f"[G13][ERROR EVENT] {payload['code']} - {payload['desc']}")
+                self._send_to_web("g13_error", payload)
+        except Exception as ex:
+            logger.exception(f"[G13] Failed to handle event: {ex}")
+
+    def _on_g13_status(self, st: dict):
+        # If you want to forward status to the web too:
+        self._send_to_web("g13_status", st)
+
 
     def _on_load_started(self):
         # Page navigating; pause direct sends until bridge is reinjected & confirmed
@@ -450,7 +528,6 @@ class MainWindow(QMainWindow):
         else:
             QTimer.singleShot(100, lambda: self._poll_bridge_ready(tries_left - 1))
 
-
     def closeEvent(self, e):
         # stop NV9 worker cleanly
         try:
@@ -461,8 +538,18 @@ class MainWindow(QMainWindow):
                 self._nv9_thread.wait()
         except Exception as ex:
             logger.warning(f"Error during NV9 shutdown: {ex}")
-        finally:
-            super().closeEvent(e)
+
+        # stop G13 worker cleanly
+        try:
+            if hasattr(self, "_g13_worker") and self._g13_worker is not None:
+                self._g13_worker.stop()
+            if hasattr(self, "_g13_thread") and self._g13_thread is not None:
+                self._g13_thread.quit()
+                self._g13_thread.wait()
+        except Exception as ex:
+            logger.warning(f"Error during G13 shutdown: {ex}")
+
+        super().closeEvent(e)
 
 
 class PageEventBridge(QObject):

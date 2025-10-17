@@ -36,6 +36,10 @@ class KioskConfig:
         self.nv9_slave_id: int = int(nv9.get("slave_id"))
         self.nv9_host_protocol_version: int = int(nv9.get("host_protocol_version"))
 
+        g13 = config_data.get("g13")
+        self.g13_port_name: str = g13.get('port_name')
+        self.g13_address: int = g13.get('address')
+
         # Validate that essential templates and keys are present
         required_keys = [self.starting_url, self.preshared_key, self.user_id]
         if not all(required_keys):
